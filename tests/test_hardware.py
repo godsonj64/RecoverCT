@@ -68,3 +68,19 @@ def test_usable_cpu_count_is_positive_and_bounded(monkeypatch) -> None:
     count = usable_cpu_count()
     assert count >= 1
     assert count <= (os.cpu_count() or 1)
+
+
+def test_num_workers_is_clamped_to_available_cpus(monkeypatch) -> None:
+    """The shipped configs request 8 workers; Colab runtimes have 2."""
+    monkeypatch.delenv("COLAB_RELEASE_TAG", raising=False)
+    profile = detect_hardware("cpu")
+    cfg = ExperimentConfig()
+    cfg.data.num_workers = profile.cpu_count + 6
+    assert resolve_config(cfg, profile).data.num_workers == profile.cpu_count
+
+
+def test_num_workers_below_the_limit_is_left_alone() -> None:
+    profile = detect_hardware("cpu")
+    cfg = ExperimentConfig()
+    cfg.data.num_workers = 1
+    assert resolve_config(cfg, profile).data.num_workers == 1

@@ -215,6 +215,14 @@ def resolve_config(cfg: ExperimentConfig, profile: HardwareProfile) -> Experimen
         cfg.train.grad_accumulation = profile.grad_accumulation
     if cfg.data.num_workers < 0:
         cfg.data.num_workers = profile.num_workers
+    elif cfg.data.num_workers > profile.cpu_count:
+        # The shipped configs assume a workstation. Honouring num_workers: 8 on a
+        # 2-vCPU Colab runtime oversubscribes the box and the loaders contend badly.
+        print(
+            f"num_workers={cfg.data.num_workers} exceeds the {profile.cpu_count} usable "
+            f"CPU(s); clamping to {profile.cpu_count}"
+        )
+        cfg.data.num_workers = profile.cpu_count
     if cfg.hardware.precision == "auto":
         cfg.hardware.precision = profile.precision
     cfg.train.amp = cfg.hardware.precision in {"fp16", "bf16"} and profile.device.startswith("cuda")
