@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,11 +19,16 @@ def _gradient_l1(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
 def _ssim3d_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     kernel = 5
     padding = kernel // 2
-    mean_x = F.avg_pool3d(prediction, kernel, stride=1, padding=padding)
-    mean_y = F.avg_pool3d(target, kernel, stride=1, padding=padding)
-    var_x = F.avg_pool3d(prediction.square(), kernel, 1, padding) - mean_x.square()
-    var_y = F.avg_pool3d(target.square(), kernel, 1, padding) - mean_y.square()
-    covariance = F.avg_pool3d(prediction * target, kernel, 1, padding) - mean_x * mean_y
+    # count_include_pad=True would average the zero padding into the border windows,
+    # pulling every border mean toward zero and inventing structure that is not there.
+    pool = partial(F.avg_pool3d, kernel_size=kernel, stride=1, padding=padding,
+                   count_include_pad=False)
+    mean_x = pool(prediction)
+    mean_y = pool(target)
+    # E[x^2] - E[x]^2 is only non-negative in exact arithmetic.
+    var_x = (pool(prediction.square()) - mean_x.square()).clamp_min(0.0)
+    var_y = (pool(target.square()) - mean_y.square()).clamp_min(0.0)
+    covariance = pool(prediction * target) - mean_x * mean_y
     c1, c2 = 0.01**2, 0.03**2
     score = ((2 * mean_x * mean_y + c1) * (2 * covariance + c2)) / (
         (mean_x.square() + mean_y.square() + c1) * (var_x + var_y + c2) + 1e-8

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import torch
 
@@ -22,7 +23,6 @@ class HardwareProfile:
     precision: str
     amp: bool
     patch_size: tuple[int, int, int]
-    base_channels: int
     batch_size: int
     grad_accumulation: int
     num_workers: int
@@ -34,6 +34,48 @@ class HardwareProfile:
         return asdict(self)
 
 
+def usable_cpu_count() -> int:
+    """CPUs this process may actually use.
+
+    ``os.cpu_count()`` reports the host, not the container. Colab and RunPod are both
+    containers, so the raw value over-provisions DataLoader workers there and the
+    workers then fight each other. Affinity, cgroup quota, and the batch-scheduler
+    variables are all checked, and the smallest positive answer wins.
+    """
+    candidates: list[int] = []
+    for variable in ("SLURM_CPUS_PER_TASK", "NSLOTS", "OMP_NUM_THREADS"):
+        raw = os.environ.get(variable)
+        if raw and raw.isdigit() and int(raw) > 0:
+            candidates.append(int(raw))
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            candidates.append(len(os.sched_getaffinity(0)))
+        except OSError:
+            pass
+    candidates.append(_cgroup_cpu_quota())
+    candidates.append(os.cpu_count() or 1)
+    positive = [value for value in candidates if value and value > 0]
+    return max(1, min(positive)) if positive else 1
+
+
+def _cgroup_cpu_quota() -> int:
+    """CPU quota from cgroup v2 or v1, or 0 when unlimited or unreadable."""
+    try:
+        v2 = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if v2 and v2[0] != "max":
+            return max(1, int(int(v2[0]) / int(v2[1])))
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        pass
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+        if quota > 0 and period > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    return 0
+
+
 def detect_runtime() -> str:
     if os.environ.get("COLAB_RELEASE_TAG") or os.environ.get("COLAB_GPU"):
         return "google_colab"
@@ -42,16 +84,27 @@ def detect_runtime() -> str:
     return "local"
 
 
-def _cuda_recommendation(vram: float) -> tuple[tuple[int, int, int], int, int, int]:
+# Every auto-tuned run optimises over the same number of patches, so a change of GPU
+# does not change the optimisation problem. Only how the patches are batched moves.
+EFFECTIVE_BATCH = 8
+
+
+def _cuda_recommendation(vram: float) -> tuple[tuple[int, int, int], int]:
+    """Patch size and micro-batch for a card of ``vram`` GiB.
+
+    ``base_channels`` is deliberately absent: it defines the architecture, and a model
+    whose width depends on the GPU it happened to train on produces checkpoints that
+    cannot be loaded elsewhere and results that cannot be compared.
+    """
     if vram < 10:
-        return (24, 64, 64), 12, 1, 8
+        return (24, 64, 64), 1
     if vram < 18:
-        return (32, 96, 96), 16, 1, 8
+        return (32, 96, 96), 1
     if vram < 28:
-        return (48, 112, 112), 20, 1, 4
+        return (48, 112, 112), 1
     if vram < 52:
-        return (64, 128, 128), 24, 1, 4
-    return (80, 160, 160), 24, 1, 2
+        return (64, 128, 128), 2
+    return (80, 160, 160), 4
 
 
 def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
@@ -61,7 +114,7 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
         raise ValueError(
             f"Unsupported device {requested_device!r}; use auto, cpu, mps, or cuda[:N]"
         )
-    cpu_count = max(1, os.cpu_count() or 1)
+    cpu_count = usable_cpu_count()
     runtime = detect_runtime()
     cuda = torch.cuda.is_available() and requested_device not in {"cpu", "mps"}
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
@@ -84,7 +137,8 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
         capability = torch.cuda.get_device_capability(index)
         bf16 = capability[0] >= 8 and torch.cuda.is_bf16_supported()
         precision = "bf16" if bf16 else "fp16"
-        patch, base, batch, accumulation = _cuda_recommendation(vram)
+        patch, batch = _cuda_recommendation(vram)
+        accumulation = max(1, EFFECTIVE_BATCH // batch)
         workers = min(12, max(2, cpu_count // 2))
         return HardwareProfile(
             runtime=runtime,
@@ -98,7 +152,6 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
             precision=precision,
             amp=True,
             patch_size=patch,
-            base_channels=base,
             batch_size=batch,
             grad_accumulation=accumulation,
             num_workers=workers,
@@ -126,9 +179,8 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
             precision="fp32",
             amp=False,
             patch_size=(24, 64, 64),
-            base_channels=12,
             batch_size=1,
-            grad_accumulation=8,
+            grad_accumulation=EFFECTIVE_BATCH,
             num_workers=min(4, max(1, cpu_count // 2)),
             channels_last_3d=False,
             tf32=False,
@@ -146,9 +198,8 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
         precision="fp32",
         amp=False,
         patch_size=(16, 64, 64),
-        base_channels=8,
         batch_size=1,
-        grad_accumulation=8,
+        grad_accumulation=EFFECTIVE_BATCH,
         num_workers=min(4, max(1, cpu_count // 2)),
         channels_last_3d=False,
         tf32=False,
@@ -158,8 +209,8 @@ def detect_hardware(requested_device: str = "auto") -> HardwareProfile:
 
 def resolve_config(cfg: ExperimentConfig, profile: HardwareProfile) -> ExperimentConfig:
     if cfg.hardware.auto_tune:
+        # Throughput knobs only. base_channels stays exactly as configured.
         cfg.data.patch_size = profile.patch_size
-        cfg.model.base_channels = profile.base_channels
         cfg.train.batch_size = profile.batch_size
         cfg.train.grad_accumulation = profile.grad_accumulation
     if cfg.data.num_workers < 0:

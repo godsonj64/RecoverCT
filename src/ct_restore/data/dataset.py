@@ -69,6 +69,7 @@ class CTVolumeDataset(Dataset[dict[str, torch.Tensor | str]]):
         artifact_probability: float = 0.9,
         allow_unreviewed: bool = False,
         seed: int = 2026,
+        deterministic: bool = False,
     ) -> None:
         with Path(manifest).open(newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -86,13 +87,34 @@ class CTVolumeDataset(Dataset[dict[str, torch.Tensor | str]]):
         self.hu_min, self.hu_max = hu_min, hu_max
         self.artifact_probability = artifact_probability
         self.seed = seed
+        self.deterministic = deterministic
+        self._draws = 0
 
     def __len__(self) -> int:
         return len(self.rows)
 
+    def _entropy(self, index: int) -> np.random.SeedSequence:
+        """Seed material for one sample.
+
+        ``torch.initial_seed()`` is fixed for a worker's whole lifetime, and
+        ``persistent_workers=True`` keeps workers alive across epochs. Seeding from
+        ``(seed, index, initial_seed)`` alone therefore replays the identical crop and
+        the identical simulated artifact every epoch, freezing augmentation after the
+        first one. A per-worker draw counter breaks that tie while staying reproducible
+        for a given seed and call order.
+
+        Validation must not move between epochs or its loss is not comparable and
+        checkpoint selection follows augmentation noise, so it seeds from the index only.
+        """
+        if self.deterministic:
+            return np.random.SeedSequence([self.seed, index])
+        entropy = [self.seed, index, torch.initial_seed() % (2**31), self._draws]
+        self._draws += 1
+        return np.random.SeedSequence(entropy)
+
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
         row = self.rows[index]
-        rng = np.random.default_rng(self.seed + index + torch.initial_seed() % (2**31))
+        rng = np.random.default_rng(self._entropy(index))
         paired_fields = [
             row.get(name, "").strip()
             for name in ("input_path", "target_path", "artifact_mask_path")

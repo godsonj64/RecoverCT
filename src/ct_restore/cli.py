@@ -238,11 +238,31 @@ def evaluate(
     """Compute HU-stratified image metrics for a paired case."""
     import nibabel as nib
 
-    pred = np.asarray(nib.load(str(prediction)).dataobj, dtype=np.float32)
-    truth = np.asarray(nib.load(str(target)).dataobj, dtype=np.float32)
+    # Without canonicalisation two volumes stored in different orientations are compared
+    # voxel-for-voxel in storage order, which yields confident nonsense rather than an
+    # error. The affine check then catches volumes that are simply on different grids.
+    def _load(path: Path) -> tuple[np.ndarray, np.ndarray]:
+        image = nib.as_closest_canonical(nib.load(str(path)))
+        return np.asarray(image.dataobj, dtype=np.float32), image.affine
+
+    pred, pred_affine = _load(prediction)
+    truth, truth_affine = _load(target)
+    if pred.shape != truth.shape:
+        raise typer.BadParameter(
+            f"Prediction shape {pred.shape} does not match target shape {truth.shape}"
+        )
+    if not np.allclose(pred_affine, truth_affine, atol=1e-3):
+        raise typer.BadParameter(
+            "Prediction and target are on different voxel grids; resample before evaluating."
+        )
     mask = None
     if artifact_mask:
-        mask = np.asarray(nib.load(str(artifact_mask)).dataobj) > 0.5
+        mask_array, mask_affine = _load(artifact_mask)
+        if mask_array.shape != truth.shape:
+            raise typer.BadParameter("Artifact mask shape does not match the target")
+        if not np.allclose(mask_affine, truth_affine, atol=1e-3):
+            raise typer.BadParameter("Artifact mask is on a different voxel grid")
+        mask = mask_array > 0.5
     values = image_metrics(pred, truth, mask)
     payload = json.dumps(values, indent=2)
     typer.echo(payload)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -21,6 +22,12 @@ from ct_restore.hardware import (
 )
 from ct_restore.losses import RestorationLoss
 from ct_restore.models import HybridRestoreNet
+
+# torch.OutOfMemoryError landed in torch 2.5, but pyproject allows torch>=2.3. On the
+# older releases the bare name would make the except clause itself raise AttributeError.
+OutOfMemory = getattr(torch, "OutOfMemoryError", None) or getattr(
+    torch.cuda, "OutOfMemoryError", RuntimeError
+)
 
 
 class EMA:
@@ -69,6 +76,7 @@ def _build_dataset(cfg: ExperimentConfig, split: str, allow_unreviewed: bool) ->
         cfg.data.artifact_probability,
         allow_unreviewed=allow_unreviewed,
         seed=cfg.train.seed,
+        deterministic=split != "train",
     )
 
 
@@ -144,13 +152,22 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
         optimizer = torch.optim.AdamW(model.parameters(), **optimizer_options)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.train.epochs)
     start_epoch = 0
+    best_validation = float("inf")
+    resume_state = None
     if cfg.train.resume:
-        state = torch.load(cfg.train.resume, map_location="cpu", weights_only=True)
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        scheduler.load_state_dict(state["scheduler"])
-        start_epoch = int(state["epoch"]) + 1
+        resume_state = torch.load(cfg.train.resume, map_location="cpu", weights_only=True)
+        model.load_state_dict(resume_state["model"])
+        optimizer.load_state_dict(resume_state["optimizer"])
+        scheduler.load_state_dict(resume_state["scheduler"])
+        start_epoch = int(resume_state["epoch"]) + 1
+        # Restarting best_validation at infinity let the first resumed epoch overwrite
+        # best.pt however bad it was.
+        best_validation = float(resume_state.get("best_validation", float("inf")))
+    # Built after the weights are restored, so a checkpoint without EMA state still
+    # seeds the shadow from the resumed model rather than from random initialisation.
     ema = EMA(model, cfg.train.ema_decay)
+    if resume_state is not None and "ema_model" in resume_state:
+        ema.shadow.load_state_dict(resume_state["ema_model"])
     criterion = RestorationLoss(**cfg.loss.__dict__).to(device)
     if cfg.hardware.compile:
         if profile.compile_supported and hasattr(torch, "compile"):
@@ -171,7 +188,6 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
     if rank == 0:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         (checkpoint_dir / "resolved_config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
-    best_validation = float("inf")
 
     for epoch in range(start_epoch, cfg.train.epochs):
         if sampler:
@@ -195,7 +211,7 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                     outputs = model(inputs)
                     loss, _ = criterion(outputs, target, corrupted, mask)
                     scaled_loss = loss / cfg.train.grad_accumulation
-                except torch.OutOfMemoryError as exc:
+                except OutOfMemory as exc:
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
                     raise RuntimeError(
@@ -204,9 +220,16 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                         "Another process may be using VRAM; lower these values in a copied "
                         "config. The failed step was not checkpointed."
                     ) from exc
+            updating = (step + 1) % cfg.train.grad_accumulation == 0 or step + 1 == len(loader)
+            # Without no_sync, DDP all-reduces gradients on every micro-step even though
+            # only the last one in an accumulation window is used.
+            sync = contextlib.nullcontext()
+            if distributed and not updating:
+                sync = model.no_sync()
             try:
-                scaler.scale(scaled_loss).backward()
-            except torch.OutOfMemoryError as exc:
+                with sync:
+                    scaler.scale(scaled_loss).backward()
+            except OutOfMemory as exc:
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
                 raise RuntimeError(
@@ -214,7 +237,7 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                     f"{cfg.data.patch_size}. Lower patch dimensions or base_channels; "
                     "the failed step was not checkpointed."
                 ) from exc
-            if (step + 1) % cfg.train.grad_accumulation == 0 or step + 1 == len(loader):
+            if updating:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
@@ -251,6 +274,7 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                 "config": cfg.to_dict(),
                 "hardware_profile": profile.to_dict(),
                 "validation_loss": validation,
+                "best_validation": min(best_validation, validation),
             }
             torch.save(checkpoint, checkpoint_dir / "last.pt")
             if validation < best_validation:
