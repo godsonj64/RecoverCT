@@ -11,6 +11,11 @@ class HybridRestoreNet(nn.Module):
 
     Inputs are normalized CT, a suspected-artifact mask, and known-voxel confidence.
     Outputs are a bounded residual, corrected CT, log variance, and a refined mask logit.
+
+    ``residual_leak`` scales how far the residual may move voxels *outside* the
+    suspected-artifact mask. 1.0 leaves the residual unconstrained, which is the
+    original behaviour; 0.0 freezes every non-artifact voxel exactly; values between
+    permit limited denoising while bounding the damage.
     """
 
     def __init__(
@@ -21,10 +26,14 @@ class HybridRestoreNet(nn.Module):
         blocks_per_level: int = 2,
         dropout: float = 0.0,
         max_residual: float = 2.0,
+        residual_leak: float = 1.0,
     ) -> None:
         super().__init__()
         if levels < 2:
             raise ValueError("levels must be >= 2")
+        if not 0.0 <= residual_leak <= 1.0:
+            raise ValueError("residual_leak must lie in [0, 1]")
+        self.residual_leak = residual_leak
         channels = [base_channels * (2**i) for i in range(levels)]
         self.max_residual = max_residual
         self.stem = nn.Conv3d(in_channels, channels[0], kernel_size=3, padding=1)
@@ -61,6 +70,13 @@ class HybridRestoreNet(nn.Module):
             y = decoder(upsample(y, skip))
         residual_raw, log_variance, artifact_logit = self.head(y).chunk(3, dim=1)
         residual = torch.tanh(residual_raw) * self.max_residual
+        if self.residual_leak < 1.0 and x.shape[1] >= 2:
+            # Preserving non-artifact HU is a safety property, and a soft identity
+            # penalty competes against the reconstruction terms rather than binding.
+            # Gating the residual by the suspected-artifact mask makes it a hard
+            # constraint: at leak 0 no voxel outside the mask can move at all.
+            gate = x[:, 1:2].clamp(0.0, 1.0)
+            residual = residual * (gate + self.residual_leak * (1.0 - gate))
         corrected = torch.clamp(source + residual, -1.0, 1.0)
         return {
             "corrected": corrected,

@@ -25,6 +25,9 @@ class ModelConfig:
     levels: int = 4
     blocks_per_level: int = 2
     dropout: float = 0.0
+    # 1.0 leaves the residual unconstrained outside the artifact mask (original
+    # behaviour); 0.0 freezes non-artifact voxels exactly.
+    residual_leak: float = 1.0
 
 
 @dataclass

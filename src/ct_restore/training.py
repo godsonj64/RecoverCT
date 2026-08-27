@@ -310,9 +310,10 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
             )
     if rank == 0 and ema.updates and ema.effective_decay() < cfg.train.ema_decay:
         print(
-            f"WARNING: only {ema.updates} EMA updates were performed, so the averaged "
-            f"weights never reached ema_decay={cfg.train.ema_decay}. Inference prefers "
-            "these weights. Train longer, lower grad_accumulation, or lower ema_decay."
+            f"Note: {ema.updates} EMA updates is short of ema_decay="
+            f"{cfg.train.ema_decay} (effective {ema.effective_decay():.4f}), so the "
+            "averaging is light. Warm-up keeps the shadow tracking the model, so this "
+            "is informational, not a correctness problem."
         )
     if distributed:
         torch.distributed.destroy_process_group()
