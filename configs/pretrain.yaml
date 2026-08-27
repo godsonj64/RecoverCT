@@ -1,0 +1,37 @@
+data:
+  manifest: data/manifests/pretrain.csv
+  patch_size: [64, 128, 128]
+  target_spacing: [1.5, 1.0, 1.0]
+  artifact_probability: 0.9
+  num_workers: 8
+model:
+  in_channels: 3
+  base_channels: 24
+  levels: 4
+  blocks_per_level: 2
+train:
+  stage: generic_ct_pretrain
+  epochs: 300
+  batch_size: 1
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  grad_accumulation: 4
+  amp: true
+  ema_decay: 0.999
+  checkpoint_dir: checkpoints/pretrain
+loss:
+  artifact_l1: 5.0
+  global_l1: 1.0
+  gradient: 0.5
+  ssim: 0.5
+  identity: 2.0
+  uncertainty: 0.1
+hardware:
+  device: auto
+  precision: auto
+  auto_tune: false
+  allow_tf32: true
+  cudnn_benchmark: true
+  channels_last_3d: true
+  compile: false
+  prefetch_factor: 2

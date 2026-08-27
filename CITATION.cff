@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, cite the repository and the source datasets listed in its data card."
+title: "CT-Restore: volumetric CT artifact inpainting and denoising research toolkit"
+type: software
+version: 0.1.0
+date-released: 2026-08-27
+license: Apache-2.0
+repository-code: "https://github.com/godsonj64/RecoverCT"
+url: "https://github.com/godsonj64/RecoverCT"
+authors:
+  - name: "CT Restore contributors"
+
