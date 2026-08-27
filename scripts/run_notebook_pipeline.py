@@ -11,7 +11,9 @@ import yaml
 from ct_restore.config import load_config
 from ct_restore.data.preprocess import preprocess_tree
 from ct_restore.data.tcia import (
+    NBIA_BASE_URL,
     download_series,
+    list_collections,
     query_ct_series,
     select_planning_candidates,
     write_series_manifest,
@@ -104,9 +106,27 @@ def main() -> None:
     train_manifest = manifests / f"{args.collection}_notebook_train.csv"
     if not args.skip_download:
         rows = query_ct_series(args.collection)
+        if not rows:
+            available = list_collections()
+            if args.collection not in available:
+                raise RuntimeError(
+                    f"Collection {args.collection!r} is not served by the public NBIA API at "
+                    f"{NBIA_BASE_URL}. It is either restricted (NBIA login / Data Retriever "
+                    f"required) or renamed. {len(available)} collections are publicly listed; "
+                    "run `ct_restore.data.tcia.list_collections()` to see them, then pass a "
+                    "reachable one with --collection."
+                )
+            raise RuntimeError(
+                f"Collection {args.collection!r} is public but returned no CT series. "
+                "Its images may be restricted even though the collection is listed."
+            )
         selected = select_planning_candidates(rows)
         if not selected:
-            raise RuntimeError("TCIA returned no planning-like CT candidates")
+            raise RuntimeError(
+                f"{len(rows)} CT series returned for {args.collection!r}, but none passed the "
+                "planning-CT filter (needs >=80 images and a non-localizer description). "
+                "Relax select_planning_candidates() or choose a different collection."
+            )
         write_series_manifest(selected, series_manifest)
         download_series(selected, raw, limit=args.limit, workers=args.workers)
     if not raw.exists():

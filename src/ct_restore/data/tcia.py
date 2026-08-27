@@ -47,6 +47,22 @@ def _session() -> requests.Session:
     return session
 
 
+def list_collections() -> list[str]:
+    """Collection names served by the public (unauthenticated) NBIA API."""
+    try:
+        response = _session().get(
+            NBIA_BASE_URL + "getCollectionValues",
+            params={"format": "json"},
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"TCIA collection listing failed: {exc}") from exc
+    if not response.content.strip():
+        return []
+    return sorted(str(row["Collection"]) for row in response.json())
+
+
 def query_ct_series(collection: str) -> list[dict[str, Any]]:
     try:
         response = _session().get(
