@@ -164,11 +164,31 @@ The TCIA command defaults to a dry run. Review the generated series metadata, TC
 current access policy, data-use terms, and storage estimate before adding `--download`.
 
 > **Access note:** `HNC-IMRT-70-33` and `HEAD-NECK-PET-CT` return zero series over the
-> anonymous NBIA API used here, so the commands below fail without authenticated access.
-> Retrieve them with an NBIA login or the official Data Retriever and point
-> `ct-restore preprocess` at the downloaded tree. The Colab/RunPod notebook therefore
-> defaults to a public collection for its smoke run, which exercises the pipeline but is
-> not head-and-neck planning data.
+> anonymous NBIA API, so the plain commands below retrieve nothing. Use one of the two
+> authenticated routes described next. The Colab/RunPod notebook defaults to a public
+> collection for its smoke run, which exercises the pipeline but is not head-and-neck
+> planning data.
+
+#### Restricted collections
+
+Credentials are read from `NBIA_USERNAME` / `NBIA_PASSWORD` or an interactive hidden
+prompt, exchanged once for an OAuth token, and never written to disk. Do not pass a
+password as a command-line argument.
+
+```bash
+# Route 1: authenticate, then query and download as usual.
+export NBIA_USERNAME=your_account
+read -rs NBIA_PASSWORD && export NBIA_PASSWORD
+ct-restore tcia --collection HNC-IMRT-70-33 --login \
+  --output-dir /external/ct_restore/raw --download --limit 1
+
+# Route 2: export a .tcia manifest from the TCIA Data Retriever, then fetch it.
+ct-restore fetch-manifest manifest-1699999999999.tcia \
+  --output-dir /external/ct_restore/raw --login --limit 1
+```
+
+Route 2 is the more reliable of the two, because it works for any collection the web
+interface lets you basket, regardless of API exposure.
 
 ```bash
 ct-restore collections

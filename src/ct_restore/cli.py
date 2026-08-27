@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -13,8 +14,10 @@ from ct_restore.config import load_config
 from ct_restore.data.preprocess import preprocess_tree
 from ct_restore.data.tcia import (
     RECOMMENDED_COLLECTIONS,
+    download_manifest_series,
     download_series,
     query_ct_series,
+    request_access_token,
     select_planning_candidates,
     write_series_manifest,
 )
@@ -74,14 +77,19 @@ def tcia(
     ] = False,
     limit: Annotated[int, typer.Option(help="Maximum series to download; 0 means all")] = 0,
     workers: Annotated[int, typer.Option(min=1, max=16)] = 4,
+    login: Annotated[
+        bool, typer.Option("--login", help="Authenticate first; required for restricted data")
+    ] = False,
 ) -> None:
     """Query TCIA and optionally download filtered CT series."""
-    rows = query_ct_series(collection)
+    token = _resolve_token(login)
+    rows = query_ct_series(collection, token=token)
     if not rows:
         typer.echo(
             f"No CT series returned for {collection!r}. Collections such as HNC-IMRT-70-33 "
-            "are not served by the anonymous NBIA API and need an NBIA login or the "
-            "official Data Retriever. Run `ct-restore collections` for access notes.",
+            "are not served anonymously: retry with --login, or download a .tcia manifest "
+            "with the Data Retriever and use `ct-restore fetch-manifest`. "
+            "Run `ct-restore collections` for access notes.",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -93,7 +101,53 @@ def tcia(
             "Dry run only. Review licenses, storage, and the manifest; pass --download to fetch."
         )
         return
-    download_series(selected, output_dir / collection, limit=limit, workers=workers)
+    download_series(selected, output_dir / collection, limit=limit, workers=workers, token=token)
+
+
+def _resolve_token(login: bool) -> str | None:
+    """Obtain an NBIA token without putting a password on the command line.
+
+    Credentials come from NBIA_USERNAME / NBIA_PASSWORD or an interactive hidden
+    prompt, are exchanged once for a token, and are never written to disk.
+    """
+    if not login:
+        return None
+    username = os.environ.get("NBIA_USERNAME") or typer.prompt("NBIA username")
+    password = os.environ.get("NBIA_PASSWORD") or typer.prompt(
+        "NBIA password", hide_input=True
+    )
+    token = request_access_token(username, password)
+    typer.echo("Authenticated to NBIA.")
+    return token
+
+
+@app.command("fetch-manifest")
+def fetch_manifest(
+    manifest_file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True, readable=True, help="A .tcia file from the Data Retriever"
+        ),
+    ],
+    output_dir: Annotated[Path, typer.Option(help="External raw-data directory")] = Path(
+        "data/raw"
+    ),
+    limit: Annotated[int, typer.Option(help="Maximum series to download; 0 means all")] = 0,
+    workers: Annotated[int, typer.Option(min=1, max=16)] = 4,
+    login: Annotated[
+        bool, typer.Option("--login", help="Authenticate first; required for restricted data")
+    ] = False,
+) -> None:
+    """Download the series listed in a .tcia manifest.
+
+    This is the supported route for collections the anonymous API will not serve, such
+    as the head-and-neck planning collections this project targets.
+    """
+    token = _resolve_token(login)
+    uids = download_manifest_series(
+        manifest_file, output_dir, limit=limit, workers=workers, token=token
+    )
+    typer.echo(f"Requested {len(uids)} series into {output_dir}")
 
 
 @app.command("preprocess")

@@ -15,6 +15,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 NBIA_BASE_URL = "https://services.cancerimagingarchive.net/nbia-api/services/v1/"
+NBIA_TOKEN_URL = "https://services.cancerimagingarchive.net/nbia-api/oauth/token"
+NBIA_OAUTH_CLIENT_ID = "nbiaRestAPIClient"
 
 RECOMMENDED_COLLECTIONS = {
     "HNC-IMRT-70-33": {
@@ -43,8 +45,10 @@ RECOMMENDED_COLLECTIONS = {
 }
 
 
-def _session() -> requests.Session:
+def _session(token: str | None = None) -> requests.Session:
     session = requests.Session()
+    if token:
+        session.headers["Authorization"] = f"Bearer {token}"
     retry = Retry(
         total=4,
         connect=4,
@@ -58,10 +62,81 @@ def _session() -> requests.Session:
     return session
 
 
-def list_collections() -> list[str]:
-    """Collection names served by the public (unauthenticated) NBIA API."""
+def request_access_token(username: str, password: str) -> str:
+    """Exchange NBIA credentials for an OAuth access token.
+
+    Restricted collections -- the head-and-neck planning collections among them --
+    return nothing anonymously and need this token. Credentials are sent once to
+    ``NBIA_TOKEN_URL`` and never stored; pass them from an environment variable or an
+    interactive prompt rather than a shell argument.
+    """
+    if not username or not password:
+        raise ValueError("Both an NBIA username and password are required")
     try:
-        response = _session().get(
+        response = requests.post(
+            NBIA_TOKEN_URL,
+            data={
+                "username": username,
+                "password": password,
+                "client_id": NBIA_OAUTH_CLIENT_ID,
+                "grant_type": "password",
+            },
+            timeout=(10, 60),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"NBIA token request failed: {exc}") from exc
+    if response.status_code in {400, 401}:
+        raise RuntimeError(f"NBIA rejected the credentials (HTTP {response.status_code})")
+    response.raise_for_status()
+    payload = response.json()
+    token = payload.get("access_token")
+    if not token:
+        raise RuntimeError("NBIA token response contained no access_token")
+    return str(token)
+
+
+def parse_tcia_manifest(path: str | Path) -> list[str]:
+    """Series UIDs from a ``.tcia`` manifest exported by the TCIA Data Retriever.
+
+    The file is a small key=value header followed by ``ListOfSeriesToDownload=`` and one
+    UID per line. Using it avoids the API entirely for collections that require a login.
+    """
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    uids: list[str] = []
+    in_list = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.replace(" ", "").lower().startswith("listofseriestodownload="):
+            in_list = True
+            trailing = line.split("=", 1)[1].strip()
+            if trailing:
+                uids.append(trailing)
+            continue
+        if not in_list:
+            continue
+        if "=" in line and not line[0].isdigit():
+            continue
+        uids.append(line)
+    invalid = [uid for uid in uids if not _looks_like_uid(uid)]
+    if invalid:
+        raise ValueError(f"Manifest contains {len(invalid)} malformed series UID(s): {invalid[:3]}")
+    if not uids:
+        raise ValueError(f"No series UIDs found in manifest: {path}")
+    deduplicated = list(dict.fromkeys(uids))
+    return deduplicated
+
+
+def _looks_like_uid(value: str) -> bool:
+    parts = value.split(".")
+    return len(parts) >= 3 and all(part.isdigit() for part in parts) and len(value) <= 64
+
+
+def list_collections(token: str | None = None) -> list[str]:
+    """Collection names the NBIA API serves for the current credentials."""
+    try:
+        response = _session(token).get(
             NBIA_BASE_URL + "getCollectionValues",
             params={"format": "json"},
             timeout=(10, 60),
@@ -74,9 +149,9 @@ def list_collections() -> list[str]:
     return sorted(str(row["Collection"]) for row in response.json())
 
 
-def query_ct_series(collection: str) -> list[dict[str, Any]]:
+def query_ct_series(collection: str, token: str | None = None) -> list[dict[str, Any]]:
     try:
-        response = _session().get(
+        response = _session(token).get(
             NBIA_BASE_URL + "getSeries",
             params={"Collection": collection, "Modality": "CT", "format": "json"},
             timeout=(10, 60),
@@ -146,7 +221,7 @@ def _safe_extract(archive: Path, destination: Path) -> None:
     (destination / ".complete").write_text("crc_checked_safe_zip_extraction\n")
 
 
-def _download_one(uid: str, output_dir: Path) -> str:
+def _download_one(uid: str, output_dir: Path, token: str | None = None) -> str:
     destination = output_dir / uid
     if (destination / ".complete").exists():
         return "already_complete"
@@ -161,7 +236,7 @@ def _download_one(uid: str, output_dir: Path) -> str:
         headers["Range"] = f"bytes={part.stat().st_size}-"
         mode = "ab"
     try:
-        response = _session().get(
+        response = _session(token).get(
             NBIA_BASE_URL + "getImageWithMD5Hash",
             params={"SeriesInstanceUID": uid},
             headers=headers,
@@ -187,7 +262,11 @@ def _download_one(uid: str, output_dir: Path) -> str:
 
 
 def download_series(
-    rows: list[dict[str, Any]], output_dir: str | Path, limit: int = 0, workers: int = 4
+    rows: list[dict[str, Any]],
+    output_dir: str | Path,
+    limit: int = 0,
+    workers: int = 4,
+    token: str | None = None,
 ) -> None:
     selected_rows = rows[:limit] if limit > 0 else rows
     uids = [str(row["SeriesInstanceUID"]) for row in selected_rows]
@@ -203,7 +282,7 @@ def download_series(
         )
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_download_one, uid, output_dir): uid for uid in uids}
+        futures = {executor.submit(_download_one, uid, output_dir, token): uid for uid in uids}
         for future in as_completed(futures):
             uid = futures[future]
             try:
@@ -213,3 +292,21 @@ def download_series(
     if failures:
         raise RuntimeError("Some TCIA series failed:\n" + "\n".join(failures))
     write_series_manifest(selected_rows, output_dir / "download_metadata.csv")
+
+
+def download_manifest_series(
+    manifest_path: str | Path,
+    output_dir: str | Path,
+    limit: int = 0,
+    workers: int = 4,
+    token: str | None = None,
+) -> list[str]:
+    """Download every series named by a ``.tcia`` manifest.
+
+    Returns the UIDs attempted. The manifest route is the supported way to obtain
+    collections the anonymous API will not serve.
+    """
+    uids = parse_tcia_manifest(manifest_path)
+    rows = [{"SeriesInstanceUID": uid} for uid in uids]
+    download_series(rows, output_dir, limit=limit, workers=workers, token=token)
+    return uids[:limit] if limit > 0 else uids
