@@ -29,6 +29,20 @@ def _gaussian_weight(shape: tuple[int, int, int]) -> torch.Tensor:
     return torch.exp(-4.0 * (zz.square() + yy.square() + xx.square())).clamp_min(1e-3)
 
 
+def _sidecar(output_path: Path, suffix: str) -> Path:
+    """Sibling path for ``output_path``, stripping a full NIfTI extension first.
+
+    ``Path.with_suffix`` only removes ``.gz`` from ``volume.nii.gz``, and a plain
+    ``str.replace(".nii.gz", ...)`` silently no-ops on a ``.nii`` output, which would
+    otherwise point the uncertainty map at the restored volume and overwrite it.
+    """
+    name = output_path.name
+    for extension in (".nii.gz", ".nii"):
+        if name.endswith(extension):
+            return output_path.with_name(name[: -len(extension)] + suffix)
+    return output_path.with_name(name + suffix)
+
+
 @torch.inference_mode()
 def sliding_window_predict(
     model: HybridRestoreNet,
@@ -160,14 +174,14 @@ def restore_nifti(
     nib.save(
         nib.Nifti1Image(corrected_hu.transpose(2, 1, 0), image.affine, image.header), output_path
     )
-    uncertainty_path = output_path.with_name(
-        output_path.name.replace(".nii.gz", "_uncertainty.nii.gz")
-    )
+    uncertainty_path = _sidecar(output_path, "_uncertainty.nii.gz")
+    if uncertainty_path == output_path:
+        raise ValueError(f"Uncertainty path collides with the restored volume: {output_path}")
     nib.save(
         nib.Nifti1Image(uncertainty_hu.transpose(2, 1, 0), image.affine, image.header),
         uncertainty_path,
     )
-    output_path.with_suffix(".provenance.json").write_text(
+    _sidecar(output_path, ".provenance.json").write_text(
         json.dumps(
             {
                 "research_use_only": True,

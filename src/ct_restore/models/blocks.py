@@ -78,15 +78,23 @@ class Downsample(nn.Sequential):
 
 
 class UpsampleFuse(nn.Module):
+    """Resize-then-convolve upsampling.
+
+    A strided ``ConvTranspose3d`` gives every sub-voxel position its own kernel, so a
+    spatially constant input still leaves a period-2 lattice in the output. For a model
+    whose output is quantitative HU that lattice is a systematic error, not cosmetic
+    texture, so upsampling is done by interpolation followed by an ordinary convolution.
+    Interpolating straight to the skip resolution also handles odd sizes without a
+    separate correction step.
+    """
+
     def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.project = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
         self.fuse = nn.Conv3d(out_channels + skip_channels, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.up(x)
-        if x.shape[2:] != skip.shape[2:]:
-            x = torch.nn.functional.interpolate(
-                x, size=skip.shape[2:], mode="trilinear", align_corners=False
-            )
-        return self.fuse(torch.cat((x, skip), dim=1))
+        x = torch.nn.functional.interpolate(
+            x, size=skip.shape[2:], mode="trilinear", align_corners=False
+        )
+        return self.fuse(torch.cat((self.project(x), skip), dim=1))
