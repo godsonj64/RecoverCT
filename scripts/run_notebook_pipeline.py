@@ -75,7 +75,12 @@ def parse_args() -> argparse.Namespace:
         description="Guarded TCIA download → preprocessing → smoke training → inference"
     )
     parser.add_argument("--data-root", type=Path, default=_default_root())
-    parser.add_argument("--collection", default="HNC-IMRT-70-33")
+    parser.add_argument(
+        "--collection",
+        default="Pancreas-CT",
+        help="Smoke-run collection. Must be served by the anonymous NBIA API; the "
+        "head-and-neck planning collections need authenticated access.",
+    )
     parser.add_argument("--limit", type=int, default=1, help="0 downloads the full collection")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--workers", type=int, default=4)

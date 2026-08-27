@@ -36,7 +36,7 @@ the bootstrap.
 ```bash
 python scripts/run_notebook_pipeline.py \
   --data-root /workspace/ct_restore_data \
-  --collection HNC-IMRT-70-33 \
+  --collection Pancreas-CT \
   --limit 1 \
   --epochs 1 \
   --accept-data-terms

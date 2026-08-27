@@ -96,7 +96,7 @@ not contain the raw projections needed at inference. See [research rationale](do
 
 | Role | Collection | Why | Access/size |
 |---|---|---|---|
-| Primary fine-tuning | `HNC-IMRT-70-33` | 211 head-and-neck cases with CT, RTSTRUCT, RTDOSE, and RTPLAN; directly relevant to planning | TCIA, about 23.27 GB |
+| Primary fine-tuning | `HNC-IMRT-70-33` | 211 head-and-neck cases with CT, RTSTRUCT, RTDOSE, and RTPLAN; directly relevant to planning. **Not served by the anonymous NBIA API** — requires an NBIA login or the official Data Retriever | TCIA, about 23.27 GB |
 | External validation | `HEAD-NECK-PET-CT` | 298 subjects from four institutions; planning CT and RT objects | TCIA controlled-access conditions may apply, about 72.46 GB |
 | Optional controlled cohort | `HNSCC` / `HEAD-NECK-CT-ATLAS` | Larger RT archive | controlled access, roughly 100–310 GB depending subset |
 
@@ -162,6 +162,13 @@ documentation that should travel together.
 
 The TCIA command defaults to a dry run. Review the generated series metadata, TCIA's
 current access policy, data-use terms, and storage estimate before adding `--download`.
+
+> **Access note:** `HNC-IMRT-70-33` and `HEAD-NECK-PET-CT` return zero series over the
+> anonymous NBIA API used here, so the commands below fail without authenticated access.
+> Retrieve them with an NBIA login or the official Data Retriever and point
+> `ct-restore preprocess` at the downloaded tree. The Colab/RunPod notebook therefore
+> defaults to a public collection for its smoke run, which exercises the pipeline but is
+> not head-and-neck planning data.
 
 ```bash
 ct-restore collections

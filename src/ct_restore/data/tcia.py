@@ -22,12 +22,23 @@ RECOMMENDED_COLLECTIONS = {
         "subjects": 211,
         "approx_size_gb": 23.27,
         "doi": "10.7937/ahqh-xc79",
+        "access": "restricted: returns no series over the anonymous NBIA API; "
+        "requires an NBIA login or the official Data Retriever",
     },
     "HEAD-NECK-PET-CT": {
         "role": "multi-institution external validation",
         "subjects": 298,
         "approx_size_gb": 72.46,
         "doi": "10.7937/K9/TCIA.2017.8oje5q00",
+        "access": "restricted: returns no series over the anonymous NBIA API; "
+        "requires an NBIA login or the official Data Retriever",
+    },
+    "Pancreas-CT": {
+        "role": "public smoke-test only; abdominal CT, not head-and-neck planning CT",
+        "subjects": 82,
+        "approx_size_gb": 7.2,
+        "doi": "10.7937/K9/TCIA.2016.tNB1kqBU",
+        "access": "public: served anonymously by the NBIA API",
     },
 }
 

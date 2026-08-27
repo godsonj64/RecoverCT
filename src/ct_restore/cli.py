@@ -77,6 +77,14 @@ def tcia(
 ) -> None:
     """Query TCIA and optionally download filtered CT series."""
     rows = query_ct_series(collection)
+    if not rows:
+        typer.echo(
+            f"No CT series returned for {collection!r}. Collections such as HNC-IMRT-70-33 "
+            "are not served by the anonymous NBIA API and need an NBIA login or the "
+            "official Data Retriever. Run `ct-restore collections` for access notes.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     selected = select_planning_candidates(rows)
     write_series_manifest(selected, manifest)
     typer.echo(f"Selected {len(selected)}/{len(rows)} candidate CT series; metadata: {manifest}")
