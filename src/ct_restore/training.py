@@ -31,19 +31,41 @@ OutOfMemory = getattr(torch, "OutOfMemoryError", None) or getattr(
 
 
 class EMA:
-    def __init__(self, model: torch.nn.Module, decay: float) -> None:
+    """Exponential moving average with a warm-up on the decay.
+
+    A fixed decay of 0.999 has a time constant of ~1000 updates. Gradient accumulation
+    makes updates scarce -- 55 volumes at accumulation 8 is 7 per epoch -- so a 50-epoch
+    run performs ~350 updates and 0.999**350 = 0.70 of the shadow is still the random
+    initialisation. Inference prefers these weights, so the exported model was mostly
+    noise while the validation curve looked like a smooth, healthy decline.
+
+    The warm-up caps the decay at ``(1 + step) / (10 + step)`` so the shadow tracks the
+    model closely at first and relaxes toward ``decay`` only once enough updates exist
+    to support it.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float, warmup: bool = True) -> None:
         self.decay = decay
+        self.warmup = warmup
+        self.updates = 0
         self.shadow = copy.deepcopy(model).eval()
         for parameter in self.shadow.parameters():
             parameter.requires_grad_(False)
 
+    def effective_decay(self) -> float:
+        if not self.warmup:
+            return self.decay
+        return min(self.decay, (1.0 + self.updates) / (10.0 + self.updates))
+
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
         source = _unwrap_model(model)
+        decay = self.effective_decay()
+        self.updates += 1
         for ema_parameter, parameter in zip(
             self.shadow.parameters(), source.parameters(), strict=True
         ):
-            ema_parameter.lerp_(parameter.detach(), 1.0 - self.decay)
+            ema_parameter.lerp_(parameter.detach(), 1.0 - decay)
         for ema_buffer, buffer in zip(self.shadow.buffers(), source.buffers(), strict=True):
             ema_buffer.copy_(buffer)
 
@@ -168,6 +190,7 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
     ema = EMA(model, cfg.train.ema_decay)
     if resume_state is not None and "ema_model" in resume_state:
         ema.shadow.load_state_dict(resume_state["ema_model"])
+        ema.updates = int(resume_state.get("ema_updates", 0))
     criterion = RestorationLoss(**cfg.loss.__dict__).to(device)
     if cfg.hardware.compile:
         if profile.compile_supported and hasattr(torch, "compile"):
@@ -275,6 +298,7 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                 "hardware_profile": profile.to_dict(),
                 "validation_loss": validation,
                 "best_validation": min(best_validation, validation),
+                "ema_updates": ema.updates,
             }
             torch.save(checkpoint, checkpoint_dir / "last.pt")
             if validation < best_validation:
@@ -284,6 +308,12 @@ def train(cfg: ExperimentConfig, allow_unreviewed: bool = False) -> Path:
                 f"epoch={epoch + 1}/{cfg.train.epochs} train={running / len(loader):.5f} "
                 f"validation={validation:.5f}"
             )
+    if rank == 0 and ema.updates and ema.effective_decay() < cfg.train.ema_decay:
+        print(
+            f"WARNING: only {ema.updates} EMA updates were performed, so the averaged "
+            f"weights never reached ema_decay={cfg.train.ema_decay}. Inference prefers "
+            "these weights. Train longer, lower grad_accumulation, or lower ema_decay."
+        )
     if distributed:
         torch.distributed.destroy_process_group()
     return checkpoint_dir / "best.pt"
